@@ -1,10 +1,33 @@
-import React, { useState, useRef } from 'react';
-import { BarChart as FlowChart, Loader, Send, User, Bot } from 'lucide-react';
+import React, { useState, useRef, useCallback } from 'react';
+import { BarChart as FlowChart, Loader, Send, User, Bot, Plus } from 'lucide-react';
+import ReactFlow, { 
+  Background, 
+  Controls, 
+  MiniMap, 
+  useNodesState, 
+  useEdgesState, 
+  addEdge,
+  Node,
+  Edge,
+  Connection,
+  MarkerType
+} from 'reactflow';
+import 'reactflow/dist/style.css';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
 }
+
+// Стандартный стиль для узлов
+const nodeDefaultStyle = {
+  background: '#f0f9ff',
+  color: '#000000',
+  border: '2px solid #3b82f6',
+  borderRadius: '8px',
+  width: 180,
+  padding: 10,
+};
 
 function App() {
   const [input, setInput] = useState('');
@@ -14,8 +37,12 @@ function App() {
   const [activeTab, setActiveTab] = useState<'direct' | 'chat'>('direct');
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [modelType, setModelType] = useState<'gemini' | 'ollama'>('ollama');
-  const diagramRef = useRef<HTMLDivElement>(null);
   const chatMessagesRef = useRef<HTMLDivElement>(null);
+  
+  // ReactFlow состояние
+  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [nextNodeId, setNextNodeId] = useState(1);
   
   // Ollama settings
   const OLLAMA_URL = 'http://localhost:11434'; // URL локального сервера Ollama
@@ -31,6 +58,72 @@ function App() {
     }
   }, [chatHistory]);
 
+  // Обработчик для добавления соединений между узлами
+  const onConnect = useCallback((params: Connection) => {
+    setEdges((eds) => 
+      addEdge({
+        ...params,
+        type: 'smoothstep',
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          width: 20,
+          height: 20,
+          color: '#3b82f6',
+        },
+        style: { stroke: '#3b82f6', strokeWidth: 2 }
+      }, eds)
+    );
+  }, [setEdges]);
+
+  // Функция для добавления нового узла
+  const addNode = () => {
+    const id = `node-${nextNodeId}`;
+    const newNode: Node = {
+      id,
+      type: 'default',
+      position: { x: 100, y: nextNodeId * 100 },
+      data: { label: 'Новый блок' },
+      style: nodeDefaultStyle,
+    };
+
+    setNodes((nds) => [...nds, newNode]);
+    setNextNodeId(nextNodeId + 1);
+  };
+
+  // Функция для переорганизации существующей блок-схемы (вертикально/горизонтально)
+  const rearrangeFlowchart = (isHorizontal: boolean = false) => {
+    if (nodes.length === 0) return;
+    
+    console.log(`Переорганизация блок-схемы в ${isHorizontal ? 'горизонтальный' : 'вертикальный'} вид`);
+    
+    const nodeWidth = 200;
+    const nodeHeight = 80;
+    const gap = 100;
+    
+    // Создаем новый массив узлов с обновленными позициями
+    const updatedNodes = nodes.map((node, index) => {
+      let newX, newY;
+      
+      if (isHorizontal) {
+        // Горизонтальное расположение
+        newX = index * (nodeWidth + gap) + 100;
+        newY = 100;
+      } else {
+        // Вертикальное расположение
+        newX = 250;
+        newY = index * (nodeHeight + gap) + 50;
+      }
+      
+      return {
+        ...node,
+        position: { x: newX, y: newY }
+      };
+    });
+    
+    // Обновляем положение узлов
+    setNodes(updatedNodes);
+  };
+
   const generateFlowchart = async () => {
     if (!input.trim()) return;
 
@@ -42,7 +135,7 @@ function App() {
       if (input.trim().length < 5) {
         console.log("Input too short, using direct processing...");
         const directSteps = [input.trim()];
-        renderSvgFlowchart(directSteps);
+        generateFlowFromSteps(directSteps);
         setLoading(false);
         return;
       }
@@ -64,459 +157,629 @@ function App() {
 
       console.log("Sending request to API...");
       
-      try {
-        let responseText = '';
+      let apiUrl: string;
+      let requestBody: any;
+      let responseText: string;
+      
+      if (modelType === 'ollama') {
+        // Используем локальный Ollama API
+        apiUrl = `${OLLAMA_URL}/api/chat`;
         
-        if (modelType === 'ollama') {
-          // Использование Ollama API
-          console.log("Using Ollama model:", OLLAMA_MODEL);
-          
-          const response = await fetch(`${OLLAMA_URL}/api/generate`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              model: OLLAMA_MODEL,
-              prompt: `Convert this text into a sequence of steps for a flowchart. Return only the steps, one per line, without any additional text or formatting: ${input}`,
-              stream: false
-            })
-          });
-          
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.error("API response error:", response.status, errorText);
-            throw new Error(`Failed to connect to Ollama API: ${response.status} ${errorText}`);
-          }
-          
-          const data = await response.json();
-          console.log("Ollama response:", data);
-          
-          if (!data.response) {
-            throw new Error('No response from Ollama API');
-          }
-          
-          responseText = data.response;
-        } else {
-          // Использование Google Gemini API (оставляем как запасной вариант)
-          const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-          if (!apiKey) {
-            throw new Error('Gemini API key is not configured');
-          }
-          
-          const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+        // Подготавливаем инструкцию для Ollama
+        const systemPrompt = `Ты - помощник для создания блок-схем. 
+        Проанализируй текст пользователя и разбей его на логические шаги процесса, разделенные переносами строк.
+        Если текст описывает процесс с шагами, выдели эти шаги в порядке их выполнения. 
+        Возвращай ТОЛЬКО список шагов, по одному на строку, БЕЗ нумерации, дополнительных комментариев или описаний.`;
+        
+        requestBody = {
+          model: OLLAMA_MODEL,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: input }
+          ],
+          stream: false
+        };
+        
+        console.log("Sending request to Ollama...");
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody),
+        });
+        
+        if (!response.ok) {
+          throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        responseText = data.message?.content || '';
+        console.log("Ollama response:", responseText);
+      } else {
+        // Google Gemini API call
+        // Обратите внимание: ниже просто заглушка, необходимо заменить реальным вызовом Gemini API
+        apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=YOUR_API_KEY`;
+        requestBody = {
+          contents: [
             {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                contents: [{
-                  parts: [{
-                    text: `Convert this text into a sequence of steps for a flowchart. Return only the steps, one per line, without any additional text or formatting: ${input}`
-                  }]
-                }]
-              }),
+              parts: [
+                {
+                  text: `Create a flowchart from this text. Return only the steps, one per line, without numbering:
+                  ${input}`
+                }
+              ]
             }
-          );
-          
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.error("API response error:", response.status, errorText);
-            throw new Error(`Failed to connect to Gemini API: ${response.status} ${errorText}`);
+          ],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 1024,
           }
-          
-          const data = await response.json();
-          
-          if (!data.candidates || data.candidates.length === 0 || 
-              !data.candidates[0].content || !data.candidates[0].content.parts || 
-              data.candidates[0].content.parts.length === 0) {
-            console.error("Invalid response structure:", data);
-            throw new Error('Invalid response structure from Gemini API');
-          }
-          
-          // Extract the text from the content parts
-          for (const part of data.candidates[0].content.parts) {
-            if (part.text) {
-              responseText += part.text;
-            }
-          }
-        }
+        };
         
-        console.log("Extracted text:", responseText);
-        
-        if (!responseText) {
-          throw new Error('No text content in the API response');
-        }
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody),
+        });
 
-        const steps = responseText
-          .split('\n')
+      if (!response.ok) {
+          throw new Error(`Gemini API error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+        responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      }
+      
+      if (!responseText) {
+        throw new Error('No text content in the API response');
+      }
+
+      const steps = responseText
+        .split('\n')
+        .filter(Boolean)
+        .map((step: string) => step.trim())
+        .filter((step: string) => step.length > 0);
+
+      console.log("Processed steps:", steps);
+
+      if (steps.length === 0) {
+        throw new Error('No valid steps generated');
+      }
+
+      // Generate flowchart nodes from steps
+      generateFlowFromSteps(steps, isHorizontal);
+      
+    } catch (fetchError) {
+      console.error("Fetch error:", fetchError);
+      
+      // More robust fallback processing
+      let fallbackSteps: string[] = [];
+      let isHorizontal = false;
+      let hasSpecialStructure = false;
+      let flowchartStructure: Array<{ text: string, right?: string, below?: string }> = [];
+      
+      // Check for numbered list (1. Step One, 2. Step Two...)
+      const numberedPattern = /^\d+\.\s+.+/;
+      const numberedLines = input
+        .split('\n')
+        .filter(line => numberedPattern.test(line.trim()));
+        
+      if (numberedLines.length > 1) {
+        console.log("Found numbered list format");
+        fallbackSteps = numberedLines.map(line => 
+          line.trim().replace(/^\d+\.\s+/, '')
+        );
+      } 
+      
+      // Check for bullet points
+      else if (input.includes('•') || input.includes('*') || input.includes('-')) {
+        console.log("Found bullet points format");
+        fallbackSteps = input
+          .split(/[•*-]/)
           .filter(Boolean)
-          .map((step: string) => step.trim())
-          .filter((step: string) => step.length > 0);
-
-        console.log("Processed steps:", steps);
+          .map(s => s.trim())
+          .filter(s => s.length > 0);
         
-        if (steps.length === 0) {
-          throw new Error('No valid steps generated');
-        }
-
-        // Generate SVG flowchart
-        renderSvgFlowchart(steps, isHorizontal);
-        
-      } catch (fetchError) {
-        console.error("Fetch error:", fetchError);
-        
-        // More robust fallback processing
-        let fallbackSteps: string[] = [];
-        let isHorizontal = false;
-        let hasSpecialStructure = false;
-        let flowchartStructure: Array<{ text: string, right?: string, below?: string }> = [];
-        
-        // Строим структуру блок-схемы с учетом специальных символов
-        // Сначала проверяем, есть ли у нас сложная структура с обоими символами - и |
-        if (input.includes('-') || input.includes('|')) {
-          hasSpecialStructure = true;
-          // Разбиваем ввод на строки
-          const lines = input.split('\n');
-          
-          // Обрабатываем каждую строку
-          let currentNode: {text: string, right?: string, below?: string} = {text: ''};
-          flowchartStructure = [];
-          
-          for (const line of lines) {
-            const trimmedLine = line.trim();
-            if (!trimmedLine) continue;
-            
-            if (trimmedLine.includes('-') && !trimmedLine.startsWith('-')) {
-              // Горизонтальная связь (справа)
-              const [nodeText, rightText] = trimmedLine.split('-').map(s => s.trim());
-              if (nodeText && rightText) {
-                currentNode = {text: nodeText, right: rightText};
-                flowchartStructure.push(currentNode);
-              }
-            } else if (trimmedLine.includes('|') && !trimmedLine.startsWith('|')) {
-              // Вертикальная связь (снизу)
-              const [nodeText, belowText] = trimmedLine.split('|').map(s => s.trim());
-              if (nodeText && belowText) {
-                currentNode = {text: nodeText, below: belowText};
-                flowchartStructure.push(currentNode);
-              }
-            } else {
-              // Обычный узел без связей
-              currentNode = {text: trimmedLine};
-              flowchartStructure.push(currentNode);
-            }
-          }
-          
-          console.log("Generated flowchart structure:", flowchartStructure);
-          
-          // Если есть специальная структура, передаем ее в SVG генератор
-          if (flowchartStructure.length > 0) {
-            renderSvgFlowchartComplex(flowchartStructure);
-            setError("Using custom structure based on special symbols - and |");
-            setLoading(false);
-            return;
-          }
-        }
-        
-        // Если специальная структура не обнаружена или не удалось ее построить,
-        // продолжаем с обычной обработкой (как было раньше)
-        // Проверяем, содержит ли текст горизонтальные связи через дефис
-        if (input.includes('-')) {
+        // For dash-separated format, make it horizontal
+        if (input.includes('-') && !input.includes('•') && !input.includes('*')) {
           isHorizontal = true;
-          fallbackSteps = input
-            .split('-')
-            .filter(Boolean)
-            .map(s => s.trim())
-            .filter(s => s.length > 0);
-          
-          if (fallbackSteps.length > 1) {
-            console.log("Detected horizontal flow with dashes", fallbackSteps);
-          } else {
-            isHorizontal = false;
-          }
-        }
-        
-        // Если не обнаружены горизонтальные связи, используем стандартные разделители
-        if (!isHorizontal || fallbackSteps.length <= 1) {
-          isHorizontal = false;
-          
-          // Try different splits based on the content
-          if (input.includes('.')) {
-            fallbackSteps = input
-              .split('.')
-              .filter(Boolean)
-              .map(s => s.trim())
-              .filter(s => s.length > 0);
-          } else if (input.includes('\n')) {
-            fallbackSteps = input
-              .split('\n')
-              .filter(Boolean)
-              .map(s => s.trim()) 
-              .filter(s => s.length > 0);
-          } else if (input.includes(',')) {
-            fallbackSteps = input
-              .split(',')
-              .filter(Boolean)
-              .map(s => s.trim())
-              .filter(s => s.length > 0);
-          }
-        }
-        
-        // If no splits worked, just use the whole input as one step
-        if (fallbackSteps.length === 0) {
-          fallbackSteps = [input.trim()];
-        }
-         
-        console.log("Using fallback steps:", fallbackSteps, "isHorizontal:", isHorizontal);
-        
-        if (fallbackSteps.length > 0) {
-          renderSvgFlowchart(fallbackSteps, isHorizontal);
-          setError("Note: Using basic processing due to API connection issue. For better results, check your internet connection.");
-        } else {
-          throw new Error("Failed to process input: Network error and insufficient input for fallback processing");
         }
       }
-    } catch (e) {
-      console.error('Flowchart generation error:', e);
-      setError(
-        e instanceof Error 
-          ? e.message
-          : 'Failed to generate flowchart. Check your internet connection and try again.'
-      );
+      
+      // Check for sentences ending with periods
+      else {
+        console.log("Trying sentence-based parsing");
+        
+        // Split by periods, but be careful with numbers like 1.5
+        // This regex looks for periods followed by a space or end of string
+        const sentenceRegex = /\.\s+|\.\s*$/;
+        const sentences = input.split(sentenceRegex);
+        
+        fallbackSteps = sentences
+          .filter(Boolean)
+          .map(s => s.trim())
+          .filter(s => s.length > 0);
+      }
+      
+      // Simple check for "A -> B" or "A → B" type connections
+      if (input.includes('->') || input.includes('→')) {
+        console.log("Found arrow notation, treating as horizontal flow");
+        
+        // Split by arrows
+        const arrowSplit = input
+          .split(/->|→/)
+          .filter(Boolean)
+          .map(s => s.trim())
+          .filter(s => s.length > 0);
+          
+        if (arrowSplit.length > 1) {
+          fallbackSteps = arrowSplit;
+          isHorizontal = true;
+        }
+      }
+      
+      // Check for complex flow structure with "if/then" statements
+      if (input.toLowerCase().includes('if') && 
+          (input.toLowerCase().includes('then') || input.toLowerCase().includes('else'))) {
+        console.log("Detected conditional flow");
+        
+        // Very simple parsing for simple if/then/else structures
+        // This is a very basic implementation and won't catch all cases
+        const lines = input.split('\n').filter(Boolean).map(line => line.trim());
+        
+        // Reset structure
+        flowchartStructure = [];
+        hasSpecialStructure = true;
+        
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].toLowerCase();
+          
+          if (line.includes('if')) {
+            // Current line has if
+            const ifText = lines[i];
+            
+            // Check for then in this line or next
+            if (i+1 < lines.length) {
+              const thenText = lines[i+1];
+              flowchartStructure.push({
+                text: ifText,
+                right: thenText.toLowerCase().includes('then') ? thenText : undefined,
+                below: thenText.toLowerCase().includes('else') ? thenText : 
+                      (i+2 < lines.length && lines[i+2].toLowerCase().includes('else')) ? 
+                      lines[i+2] : undefined
+              });
+            } else {
+              // Just add as a single node if there's no following line
+              flowchartStructure.push({ text: ifText });
+            }
+          } else if (!line.includes('then') && !line.includes('else') && 
+                    !lines[i-1]?.toLowerCase().includes('if')) {
+            // Line that's not part of a conditional, add as standalone
+            flowchartStructure.push({ text: lines[i] });
+          }
+          // Skip lines that are 'then' or 'else' as we've already handled them
+        }
+        
+        console.log("Flow structure:", flowchartStructure);
+      }
+      
+      // Check if we have a valid structure
+      if (hasSpecialStructure && flowchartStructure.length > 0) {
+        // Generate complex flowchart
+        generateComplexFlowchart(flowchartStructure);
+      } 
+      // If no special structure but we have steps from fallback parsing
+      else if (fallbackSteps.length > 0) {
+        console.log("Using fallback steps:", fallbackSteps, "isHorizontal:", isHorizontal);
+        generateFlowFromSteps(fallbackSteps, isHorizontal);
+        setError("Note: Using basic processing due to API connection issue. For better results, check your internet connection.");
+      } 
+      // If no splits worked, just use the whole input as one step
+      else {
+        fallbackSteps = [input.trim()];
+        generateFlowFromSteps(fallbackSteps, false);
+        setError("Note: Using basic processing due to API connection issue. For better results, check your internet connection.");
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  // Функция для отправки сообщения в чате
-  const sendChatMessage = async () => {
-    if (!chatInput.trim()) return;
+  // Функция для создания блок-схемы из шагов
+  const generateFlowFromSteps = (steps: string[], isHorizontal: boolean = false) => {
+    // Очищаем предыдущие узлы и соединения
+    setNodes([]);
+    setEdges([]);
+    
+    const newNodes: Node[] = [];
+    const newEdges: Edge[] = [];
+    
+    // Определяем общие размеры для расчета позиций
+    const nodeWidth = 200;
+    const nodeHeight = 80;
+    const gap = 100;
+    
+    console.log(`Генерирую ${steps.length} блоков для шагов:`, steps);
+    
+    // Обработка шагов перед созданием блоков
+    const processedSteps = steps.map(step => {
+      // Удаляем mermaid синтаксис и любые markdown элементы
+      return step
+        .replace(/```mermaid|```/g, '')
+        .replace(/graph\s+TD/i, '')
+        .replace(/graph\s+LR/i, '')
+        .trim();
+    }).filter(step => step.length > 0);
+    
+    // Создаем узлы на основе шагов
+    processedSteps.forEach((step, index) => {
+      const id = `node-${index}`;
+      
+      let positionX, positionY;
+      
+      if (isHorizontal) {
+        // Размещаем узлы горизонтально
+        positionX = index * (nodeWidth + gap) + 100;
+        positionY = 100;
+      } else {
+        // Размещаем узлы вертикально
+        positionX = 250;
+        positionY = index * (nodeHeight + gap) + 50;
+      }
+      
+      // Создаем новый узел
+      const newNode: Node = {
+        id,
+        type: 'default',
+        position: { x: positionX, y: positionY },
+        data: { label: step },
+        style: nodeDefaultStyle,
+      };
+      
+      newNodes.push(newNode);
+      
+      // Создаем соединение с предыдущим узлом
+      if (index > 0) {
+        const newEdge: Edge = {
+          id: `edge-${index-1}-${index}`,
+          source: `node-${index-1}`,
+          target: id,
+          type: 'smoothstep',
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 20,
+            height: 20,
+            color: '#3b82f6',
+          },
+          style: { stroke: '#3b82f6', strokeWidth: 2 }
+        };
+        
+        newEdges.push(newEdge);
+      }
+    });
+    
+    // Устанавливаем новые узлы и соединения
+    setNodes(newNodes);
+    setEdges(newEdges);
+    
+    // Обновляем счетчик узлов для будущих ручных добавлений
+    setNextNodeId(processedSteps.length + 1);
+  };
+  
+  // Функция для создания сложной блок-схемы
+  const generateComplexFlowchart = (structure: Array<{ text: string, right?: string, below?: string }>) => {
+    // Очищаем предыдущие узлы и соединения
+    setNodes([]);
+    setEdges([]);
+    
+    const newNodes: Node[] = [];
+    const newEdges: Edge[] = [];
+    
+    // Определяем общие размеры для расчета позиций
+    const nodeWidth = 200;
+    const nodeHeight = 80;
+    const gapX = 250;
+    const gapY = 150;
+    
+    // Мапим индексы узлов для создания соединений
+    const nodeMap: Record<string, string> = {};
+    
+    structure.forEach((node, index) => {
+      // Основной узел
+      const mainId = `node-${index}-main`;
+      nodeMap[node.text] = mainId;
+      
+      newNodes.push({
+        id: mainId,
+        type: 'default',
+        position: { x: 250, y: index * (nodeHeight + gapY) + 50 },
+        data: { label: node.text },
+        style: nodeDefaultStyle,
+      });
+      
+      // Узел справа (если есть)
+      if (node.right) {
+        const rightId = `node-${index}-right`;
+        nodeMap[node.right] = rightId;
+        
+        newNodes.push({
+          id: rightId,
+          type: 'default',
+          position: { x: 250 + nodeWidth + gapX, y: index * (nodeHeight + gapY) + 50 },
+          data: { label: node.right },
+          style: nodeDefaultStyle,
+        });
+        
+        // Соединение с узлом справа
+        newEdges.push({
+          id: `edge-${index}-right`,
+          source: mainId,
+          target: rightId,
+          type: 'smoothstep',
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 20,
+            height: 20,
+            color: '#3b82f6',
+          },
+          style: { stroke: '#3b82f6', strokeWidth: 2 }
+        });
+      }
+      
+      // Узел снизу (если есть)
+      if (node.below) {
+        const belowId = `node-${index}-below`;
+        nodeMap[node.below] = belowId;
+        
+        newNodes.push({
+          id: belowId,
+          type: 'default',
+          position: { x: 250, y: index * (nodeHeight + gapY) + 50 + nodeHeight + gapY/2 },
+          data: { label: node.below },
+          style: nodeDefaultStyle,
+        });
+        
+        // Соединение с узлом снизу
+        newEdges.push({
+          id: `edge-${index}-below`,
+          source: mainId,
+          target: belowId,
+          type: 'smoothstep',
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 20,
+            height: 20,
+            color: '#3b82f6',
+          },
+          style: { stroke: '#3b82f6', strokeWidth: 2 }
+        });
+      }
+      
+      // Соединение с предыдущим основным узлом
+      if (index > 0) {
+        newEdges.push({
+          id: `edge-${index-1}-${index}`,
+          source: `node-${index-1}-main`,
+          target: mainId,
+          type: 'smoothstep',
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 20,
+            height: 20,
+            color: '#3b82f6',
+          },
+          style: { stroke: '#3b82f6', strokeWidth: 2 }
+        });
+      }
+    });
+    
+    // Устанавливаем новые узлы и соединения
+    setNodes(newNodes);
+    setEdges(newEdges);
+    
+    // Обновляем счетчик узлов для будущих ручных добавлений
+    setNextNodeId(newNodes.length + 1);
+  };
 
+  // Обработчик отправки сообщения в чате
+  const handleSendMessage = async () => {
+    if (!chatInput.trim()) return;
+    
     const userMessage: ChatMessage = {
       role: 'user',
       content: chatInput
     };
-
-    // Добавляем сообщение пользователя в историю
+    
+    // Сначала проверим запрос пользователя на наличие упоминаний шагов
+    const userSteps: string[] = [];
+    const userInputText = chatInput.trim();
+    
+    // Поиск шагов в формате "Шаг 1", "Шаг 2", и т.д.
+    const stepRegex = /Шаг\s+(\d+)/gi;
+    let match;
+    let matchFound = false;
+    
+    while ((match = stepRegex.exec(userInputText)) !== null) {
+      matchFound = true;
+      userSteps.push(`Шаг ${match[1]}`);
+    }
+    
+    // Проверяем, содержит ли запрос команду изменения ориентации схемы
+    const hasVerticalCommand = /верти(кальн|кал)/i.test(userInputText);
+    const hasHorizontalCommand = /гориз(онтальн|онтал)/i.test(userInputText);
+    
+    // Если это команда изменения ориентации существующей схемы
+    if (nodes.length > 0 && (hasVerticalCommand || hasHorizontalCommand)) {
+      setChatHistory(prev => [...prev, userMessage]);
+      setChatInput('');
+      
+      // Переорганизуем блок-схему
+      rearrangeFlowchart(hasHorizontalCommand);
+      
+      // Добавляем ответ ассистента
+      const systemResponse: ChatMessage = {
+        role: 'assistant',
+        content: `Готово! Блок-схема переорганизована в ${hasHorizontalCommand ? 'горизонтальный' : 'вертикальный'} вид.`
+      };
+      
+      setChatHistory(prev => [...prev, systemResponse]);
+      return;
+    }
+    
     setChatHistory(prev => [...prev, userMessage]);
     setChatInput('');
     setLoading(true);
-
+    
     try {
-      let aiResponse = '';
+      let responseText = '';
       
       if (modelType === 'ollama') {
-        // Использование Ollama API для чата
-        const messages = chatHistory.map(msg => ({
-          role: msg.role === 'user' ? 'user' : 'assistant',
-          content: msg.content
-        }));
+        // Используем локальный Ollama API
+        const apiUrl = `${OLLAMA_URL}/api/chat`;
         
-        // Добавляем текущее сообщение
-        messages.push({
-          role: 'user',
-          content: chatInput
-        });
+        const systemPrompt = "Ты - помощник для создания блок-схем, диаграмм процессов. " + 
+                           "Помогай пользователю анализировать процессы и разбивать их на шаги. " +
+                           "Если пользователь упоминает конкретные шаги (например, 'Шаг 1', 'Шаг 2'), трактуй это буквально, " +
+                           "не пытайся интерпретировать это как просьбу объяснить процесс. " +
+                           "Если пользователь просит создать блок-схему с конкретными шагами, просто подтверди, что создаешь эти конкретные шаги. " +
+                           "Не используй mermaid или другие специальные форматы кода в ответе - просто указывай шаги обычным текстом.";
         
-        // Добавляем системный промпт
-        const systemPrompt = `Ты помощник по созданию блок-схем. Анализируй запросы пользователя и помогай создавать блок-схемы. 
-        Если пользователь просит создать блок-схему, ответь текстом в специальном формате для отображения:
-        FLOWCHART:
-        Шаг 1
-        Шаг 2
-        Шаг 3
+        const messages = [
+          { role: "system", content: systemPrompt },
+          ...chatHistory.map(msg => ({ role: msg.role, content: msg.content })),
+          { role: "user", content: chatInput }
+        ];
         
-        Или, если пользователь хочет блок-схему с горизонтальными и вертикальными связями:
-        COMPLEX_FLOWCHART:
-        Блок A - Блок B
-        Блок A | Блок C
-        Блок C - Блок D
-        
-        Во всех остальных случаях отвечай как обычный помощник.`;
-        
-        const response = await fetch(`${OLLAMA_URL}/api/chat`, {
+        const response = await fetch(apiUrl, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
           },
           body: JSON.stringify({
             model: OLLAMA_MODEL,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              ...messages
-            ],
+            messages: messages,
             stream: false
-          })
+          }),
         });
         
         if (!response.ok) {
-          throw new Error(`Error connecting to Ollama: ${response.status}`);
+          throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
         }
         
         const data = await response.json();
-        console.log("Ollama chat response:", data);
-        
-        if (!data.message || !data.message.content) {
-          throw new Error('Invalid response from Ollama');
-        }
-        
-        aiResponse = data.message.content;
+        responseText = data.message?.content || 'Извините, не удалось получить ответ.';
       } else {
-        // Gemini API (оставляем как запасной вариант)
-        const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-        if (!apiKey) {
-          throw new Error('API key is not configured');
-        }
-  
-        // Формируем историю сообщений для контекста
-        const messages = chatHistory.map(msg => ({
-          role: msg.role,
-          parts: [{ text: msg.content }]
-        }));
-  
-        // Добавляем текущее сообщение пользователя
-        messages.push({
-          role: 'user',
-          parts: [{ text: chatInput }]
-        });
-  
-        // Строим промпт с инструкциями для модели
-        const systemPrompt = {
-          role: 'system',
-          parts: [{ 
-            text: `Ты помощник по созданию блок-схем. Анализируй запросы пользователя и помогай создавать блок-схемы. 
-            Если пользователь просит создать блок-схему, ответь текстом в специальном формате для отображения:
-            FLOWCHART:
-            Шаг 1
-            Шаг 2
-            Шаг 3
-            
-            Или, если пользователь хочет блок-схему с горизонтальными и вертикальными связями:
-            COMPLEX_FLOWCHART:
-            Блок A - Блок B
-            Блок A | Блок C
-            Блок C - Блок D
-            
-            Во всех остальных случаях отвечай как обычный помощник.`
-          }]
-        };
-  
-        // Добавляем системный промпт в начало сообщений
-        const requestMessages = [systemPrompt, ...messages];
-  
-        // Отправляем запрос к API
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              contents: requestMessages
-            }),
-          }
-        );
-  
-        if (!response.ok) {
-          throw new Error(`Error connecting to AI: ${response.status}`);
-        }
-  
-        const data = await response.json();
-        if (!data.candidates || !data.candidates[0]?.content?.parts?.[0]?.text) {
-          throw new Error('Invalid response from AI');
-        }
-  
-        aiResponse = data.candidates[0].content.parts[0].text;
+        // Заглушка для Google Gemini API
+        responseText = "Извините, в данный момент API Google Gemini не настроен. Используйте Ollama.";
       }
       
-      // Добавляем ответ ассистента в историю
       const assistantMessage: ChatMessage = {
         role: 'assistant',
-        content: aiResponse
+        content: responseText
       };
       
       setChatHistory(prev => [...prev, assistantMessage]);
-
-      // Проверяем, содержит ли ответ ИИ инструкции для создания блок-схемы
-      if (aiResponse.includes('FLOWCHART:')) {
-        const flowchartText = aiResponse.split('FLOWCHART:')[1].trim();
-        const steps = flowchartText
-          .split('\n')
-          .filter(Boolean)
-          .map((step: string) => step.trim())
-          .filter((step: string) => step.length > 0);
-
-        if (steps.length > 0) {
-          renderSvgFlowchart(steps);
+      
+      // Проверяем, содержит ли запрос или ответ команду изменения ориентации
+      if (hasVerticalCommand || hasHorizontalCommand || 
+          /вертик/i.test(responseText) || /гориз/i.test(responseText)) {
+        
+        // Если у нас есть существующие блоки, меняем их ориентацию
+        if (nodes.length > 0) {
+          rearrangeFlowchart(hasHorizontalCommand || /гориз/i.test(responseText));
         }
-      } else if (aiResponse.includes('COMPLEX_FLOWCHART:')) {
-        const flowchartText = aiResponse.split('COMPLEX_FLOWCHART:')[1].trim();
+      }
+      
+      // Если в запросе пользователя были найдены упоминания шагов, используем их напрямую
+      if (matchFound && userSteps.length > 0) {
+        console.log("Создаю блок-схему на основе шагов из запроса пользователя:", userSteps);
+        // Очищаем предыдущие блоки и создаем новые на основе найденных шагов
+        generateFlowFromSteps(userSteps, hasHorizontalCommand);
+      } else if (userInputText.toLowerCase().includes('шаг') && 
+                !(/шаг\s+\d+/i.test(userInputText))) {
+        // Если пользователь упоминает слово "шаг", но не в формате "Шаг N", используем весь текст
+        console.log("Создаю один блок с полным текстом запроса:", userInputText);
+        generateFlowFromSteps([userInputText], hasHorizontalCommand);
+      } else {
+        // Если не нашли шаги в запросе пользователя, анализируем ответ ассистента
+
+        // Сначала проверим на наличие шагов формата "Шаг N" в ответе
+        const stepRgxInResponse = /Шаг\s+(\d+)/gi;
+        const matches: RegExpExecArray[] = [];
+        let stepMatch;
         
-        // Создаем структуру для сложной блок-схемы
-        let flowchartStructure: Array<{ text: string, right?: string, below?: string }> = [];
-        const lines = flowchartText.split('\n');
+        // Собираем все совпадения в массив
+        while ((stepMatch = stepRgxInResponse.exec(responseText)) !== null) {
+          matches.push(stepMatch);
+        }
         
-        for (const line of lines) {
-          const trimmedLine = line.trim();
-          if (!trimmedLine) continue;
+        if (matches.length > 0) {
+          console.log("Найдены упоминания шагов в ответе:", matches.length);
           
-          if (trimmedLine.includes('-') && !trimmedLine.startsWith('-')) {
-            // Горизонтальная связь (справа)
-            const [nodeText, rightText] = trimmedLine.split('-').map((s: string) => s.trim());
-            if (nodeText && rightText) {
-              flowchartStructure.push({text: nodeText, right: rightText});
-            }
-          } else if (trimmedLine.includes('|') && !trimmedLine.startsWith('|')) {
-            // Вертикальная связь (снизу)
-            const [nodeText, belowText] = trimmedLine.split('|').map((s: string) => s.trim());
-            if (nodeText && belowText) {
-              flowchartStructure.push({text: nodeText, below: belowText});
+          // Если нашли шаги формата "Шаг N", проверяем, есть ли у них описание
+          const steps: string[] = [];
+          const lines = responseText.split('\n').map(line => line.trim()).filter(Boolean);
+          
+          if (lines.length > matches.length) {
+            // Есть больше строк чем шагов - вероятно, есть описания
+            for (const line of lines) {
+              if (line.length > 0 && !line.startsWith('```')) {
+                steps.push(line);
+              }
             }
           } else {
-            // Обычный узел без связей
-            flowchartStructure.push({text: trimmedLine});
+            // Если строк меньше или столько же, просто используем найденные шаги
+            for (const match of matches) {
+              steps.push(match[0]); // match[0] содержит полное совпадение, например "Шаг 1"
+            }
           }
-        }
-        
-        if (flowchartStructure.length > 0) {
-          renderSvgFlowchartComplex(flowchartStructure);
+          
+          console.log("Создаю блок-схему на основе обработанных строк:", steps);
+          generateFlowFromSteps(steps, hasHorizontalCommand);
+        } else {
+          // Если не нашли упоминания шагов, пробуем разбить текст по переносам строк
+          const steps = responseText
+            .split('\n')
+            .filter(Boolean)
+            .map((step: string) => step.trim())
+            .filter((step: string) => 
+              step.length > 0 && 
+              !step.startsWith('```') && 
+              !step.startsWith('`mermaid') && 
+              !step.startsWith('graph') && 
+              !step.startsWith('A[') && 
+              step !== '"mermaid"'
+            );
+          
+          if (steps.length > 0) {
+            console.log("Создаю блок-схему на основе строк ответа:", steps);
+            generateFlowFromSteps(steps, hasHorizontalCommand);
+          } else if (responseText.trim().length > 0) {
+            // Если после фильтрации не осталось шагов, но есть текст, используем весь текст
+            console.log("Создаю один блок с ответом ассистента");
+            generateFlowFromSteps([responseText.trim()], hasHorizontalCommand);
+          }
         }
       }
     } catch (error) {
       console.error('Chat error:', error);
-      // Добавляем сообщение об ошибке в историю
-      setChatHistory(prev => [...prev, {
+      
+      // Добавляем сообщение об ошибке
+      const errorMessage: ChatMessage = {
         role: 'assistant',
-        content: 'Извините, произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте еще раз.'
-      }]);
+        content: 'Извините, произошла ошибка при обработке вашего запроса. Пожалуйста, проверьте подключение к Ollama и убедитесь, что сервер запущен.'
+      };
+      
+      setChatHistory(prev => [...prev, errorMessage]);
     } finally {
       setLoading(false);
     }
   };
 
-  // SVG flowchart renderer
-  const renderSvgFlowchart = (steps: string[], isHorizontal: boolean = false): void => {
-    const svgCode = generateSvgFlowchart(steps, isHorizontal);
-    const element = diagramRef.current;
-    if (element) {
-      element.innerHTML = svgCode;
-    }
-  };
-
-  // SVG flowchart renderer для сложных структур с горизонтальными и вертикальными связями
-  const renderSvgFlowchartComplex = (structure: Array<{ text: string, right?: string, below?: string }>): void => {
-    const svgCode = generateSvgFlowchartComplex(structure);
-    const element = diagramRef.current;
-    if (element) {
-      element.innerHTML = svgCode;
-    }
-  };
-
-  // Helper function to escape HTML special characters
+  // Вспомогательная функция для экранирования HTML
   const escapeHtml = (unsafe: string): string => {
     return unsafe
       .replace(/&/g, "&amp;")
@@ -526,368 +789,9 @@ function App() {
       .replace(/'/g, "&#039;");
   };
 
-  // SVG flowchart generator
-  const generateSvgFlowchart = (steps: string[], isHorizontal: boolean = false): string => {
-    const baseNodeWidth = 150;
-    const baseNodeHeight = 60;
-    const gap = 50;
-    const charWidth = 8; // примерная ширина символа в пикселях
-    const lineHeight = 20; // высота строки в пикселях
-    const padding = 20; // отступ от текста до границы блока
-    
-    // Рассчитываем размеры всех узлов
-    const nodeSizes = steps.map(step => {
-      const lines = step.split('\n');
-      const maxLineLength = Math.max(...lines.map(line => line.length));
-      const width = Math.max(baseNodeWidth, maxLineLength * charWidth + padding * 2);
-      const height = Math.max(baseNodeHeight, lines.length * lineHeight + padding * 2);
-      return { width, height };
-    });
-    
-    // Calculate total dimensions based on direction and node sizes
-    let totalWidth, totalHeight;
-    
-    if (isHorizontal) {
-      // For horizontal layout, sum all widths plus gaps
-      totalWidth = nodeSizes.reduce((sum, size, i) => sum + size.width, 0) + 
-                  (steps.length - 1) * gap + 100; // padding
-      // Height is the maximum node height plus padding
-      totalHeight = Math.max(...nodeSizes.map(s => s.height)) + 100;
-    } else {
-      // For vertical layout, width is the maximum node width plus padding
-      totalWidth = Math.max(...nodeSizes.map(s => s.width)) + 100;
-      // Height is the sum of all heights plus gaps
-      totalHeight = nodeSizes.reduce((sum, size) => sum + size.height, 0) + 
-                    (steps.length - 1) * gap + 100; // padding
-    }
-    
-    let svgNodes = '';
-    let svgConnectors = '';
-    
-    // Define arrow marker
-    const arrowMarker = `
-      <defs>
-        <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-          <polygon points="0 0, 10 3.5, 0 7" fill="#3b82f6" />
-        </marker>
-      </defs>
-    `;
-    
-    // Generate nodes and connectors
-    let currentX = 50; // starting X position
-    let currentY = 50; // starting Y position
-    
-    steps.forEach((step, index) => {
-      const { width, height } = nodeSizes[index];
-      let x, y;
-      
-      if (isHorizontal) {
-        // Position nodes in a horizontal line
-        x = currentX;
-        y = totalHeight / 2 - height / 2;
-        currentX += width + gap; // move X for next node
-      } else {
-        // Position nodes in a vertical line
-        x = totalWidth / 2 - width / 2;
-        y = currentY;
-        currentY += height + gap; // move Y for next node
-      }
-      
-      // Create node rectangle
-      svgNodes += `
-        <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="8" ry="8" 
-              fill="#f0f9ff" stroke="#3b82f6" stroke-width="2" />
-      `;
-      
-      // Handle multiline text
-      const lines = step.split('\n');
-      if (lines.length === 1) {
-        // Single line text
-        svgNodes += `
-          <text x="${x + width / 2}" y="${y + height / 2}" 
-                font-family="Arial, sans-serif" font-size="14" text-anchor="middle" 
-                dominant-baseline="middle" fill="#000000">
-            ${escapeHtml(step)}
-          </text>
-        `;
-      } else {
-        // Multiline text
-        const lineSpacing = Math.min(height / (lines.length + 1), lineHeight);
-        lines.forEach((line, lineIndex) => {
-          svgNodes += `
-            <text x="${x + width / 2}" y="${y + (lineIndex + 1) * lineSpacing}" 
-                  font-family="Arial, sans-serif" font-size="14" text-anchor="middle" 
-                  dominant-baseline="middle" fill="#000000">
-              ${escapeHtml(line)}
-            </text>
-          `;
-        });
-      }
-      
-      // Create connector to previous node
-      if (index > 0) {
-        const prevNodeSize = nodeSizes[index - 1];
-        let startX, startY, endX, endY;
-        
-        if (isHorizontal) {
-          // Horizontal connector
-          startX = x - gap;
-          startY = totalHeight / 2;
-          endX = x;
-          endY = totalHeight / 2;
-        } else {
-          // Vertical connector
-          startX = totalWidth / 2;
-          startY = y - gap;
-          endX = totalWidth / 2;
-          endY = y;
-        }
-        
-        svgConnectors += `
-          <line x1="${startX}" y1="${startY}" x2="${endX}" y2="${endY}" 
-                stroke="#3b82f6" stroke-width="2" marker-end="url(#arrowhead)" />
-        `;
-      }
-    });
-    
-    return `
-      <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${totalHeight}" viewBox="0 0 ${totalWidth} ${totalHeight}">
-        ${arrowMarker}
-        ${svgNodes}
-        ${svgConnectors}
-      </svg>
-    `;
-  };
-
-  // SVG generator для сложных структур с горизонтальными и вертикальными связями
-  const generateSvgFlowchartComplex = (structure: Array<{ text: string, right?: string, below?: string }>): string => {
-    const baseNodeWidth = 150;
-    const baseNodeHeight = 60;
-    const gap = 70;
-    const charWidth = 8; // примерная ширина символа в пикселях
-    const lineHeight = 20; // высота строки в пикселях
-    const padding = 20; // отступ от текста до границы блока
-    
-    // Собираем все уникальные тексты узлов
-    const allNodeTexts = new Set<string>();
-    structure.forEach(node => {
-      allNodeTexts.add(node.text);
-      if (node.right) allNodeTexts.add(node.right);
-      if (node.below) allNodeTexts.add(node.below);
-    });
-    
-    // Рассчитываем размеры для каждого текста
-    const textSizes = new Map<string, {width: number, height: number}>();
-    allNodeTexts.forEach(text => {
-      const lines = text.split('\n');
-      const maxLineLength = Math.max(...lines.map(line => line.length));
-      const width = Math.max(baseNodeWidth, maxLineLength * charWidth + padding * 2);
-      const height = Math.max(baseNodeHeight, lines.length * lineHeight + padding * 2);
-      textSizes.set(text, { width, height });
-    });
-    
-    // Рассчитываем размеры SVG на основе структуры
-    // Упрощенная версия - мы строим сетку узлов
-    const grid: Array<Array<{text: string, id: string, width: number, height: number}>> = [];
-    
-    // Заполняем первую строку основными узлами
-    const firstRow: Array<{text: string, id: string, width: number, height: number}> = [];
-    structure.forEach((node, index) => {
-      const size = textSizes.get(node.text) || {width: baseNodeWidth, height: baseNodeHeight};
-      firstRow.push({text: node.text, id: `node_${index}_0`, ...size});
-    });
-    grid.push(firstRow);
-    
-    // Добавляем узлы справа (горизонтальные)
-    structure.forEach((node, rowIndex) => {
-      if (node.right) {
-        const size = textSizes.get(node.right) || {width: baseNodeWidth, height: baseNodeHeight};
-        if (!grid[0][rowIndex + 1]) {
-          // Если в первой строке нет узла справа, добавляем его
-          firstRow.push({text: node.right, id: `node_${rowIndex}_right`, ...size});
-        }
-      }
-    });
-    
-    // Добавляем узлы снизу (вертикальные)
-    structure.forEach((node, colIndex) => {
-      if (node.below) {
-        const size = textSizes.get(node.below) || {width: baseNodeWidth, height: baseNodeHeight};
-        if (!grid[1]) {
-          // Если второй строки нет, создаем ее
-          grid.push([]);
-        }
-        grid[1][colIndex] = {text: node.below, id: `node_${colIndex}_1`, ...size};
-      }
-    });
-    
-    // Определяем размеры сетки
-    const cols = Math.max(...grid.map(row => row.length));
-    
-    // Рассчитываем максимальную ширину каждого столбца и высоту каждой строки
-    const colWidths = Array(cols).fill(0);
-    const rowHeights = Array(grid.length).fill(0);
-    
-    // Находим максимальную ширину для каждого столбца
-    grid.forEach(row => {
-      row.forEach((node, colIndex) => {
-        if (node && colWidths[colIndex] < node.width) {
-          colWidths[colIndex] = node.width;
-        }
-      });
-    });
-    
-    // Находим максимальную высоту для каждой строки
-    grid.forEach((row, rowIndex) => {
-      row.forEach(node => {
-        if (node && rowHeights[rowIndex] < node.height) {
-          rowHeights[rowIndex] = node.height;
-        }
-      });
-    });
-    
-    // Рассчитываем размер SVG
-    const svgWidth = colWidths.reduce((sum, width) => sum + width, 0) + (cols + 1) * gap;
-    const svgHeight = rowHeights.reduce((sum, height) => sum + height, 0) + (grid.length + 1) * gap;
-    
-    let svgNodes = '';
-    let svgConnectors = '';
-    
-    // Определяем маркер для стрелок
-    const arrowMarker = `
-      <defs>
-        <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-          <polygon points="0 0, 10 3.5, 0 7" fill="#3b82f6" />
-        </marker>
-      </defs>
-    `;
-    
-    // Создаем узлы
-    // Рассчитываем позиции для каждого узла на основе максимальных размеров в сетке
-    const nodePositions = new Map<string, {x: number, y: number, width: number, height: number}>();
-    
-    grid.forEach((row, rowIndex) => {
-      let yPos = gap;
-      // Добавляем высоты предыдущих строк
-      for (let i = 0; i < rowIndex; i++) {
-        yPos += rowHeights[i] + gap;
-      }
-      
-      let xPos = gap;
-      row.forEach((node, colIndex) => {
-        if (node) {
-          // Для позиции X, добавляем ширины предыдущих столбцов
-          if (colIndex > 0) {
-            xPos = gap;
-            for (let i = 0; i < colIndex; i++) {
-              xPos += colWidths[i] + gap;
-            }
-          }
-          
-          // Сохраняем позицию узла
-          nodePositions.set(node.id, {
-            x: xPos,
-            y: yPos,
-            width: node.width,
-            height: node.height
-          });
-          
-          // Создаем прямоугольник узла
-          svgNodes += `
-            <rect x="${xPos}" y="${yPos}" width="${node.width}" height="${node.height}" rx="8" ry="8" 
-                  fill="#f0f9ff" stroke="#3b82f6" stroke-width="2" />
-          `;
-          
-          // Обрабатываем многострочный текст
-          const lines = node.text.split('\n');
-          if (lines.length === 1) {
-            // Однострочный текст
-            svgNodes += `
-              <text x="${xPos + node.width / 2}" y="${yPos + node.height / 2}" 
-                    font-family="Arial, sans-serif" font-size="14" text-anchor="middle" 
-                    dominant-baseline="middle" fill="#000000">
-                ${escapeHtml(node.text)}
-              </text>
-            `;
-          } else {
-            // Многострочный текст
-            const lineSpacing = Math.min(node.height / (lines.length + 1), lineHeight);
-            lines.forEach((line, lineIndex) => {
-              svgNodes += `
-                <text x="${xPos + node.width / 2}" y="${yPos + (lineIndex + 1) * lineSpacing}" 
-                      font-family="Arial, sans-serif" font-size="14" text-anchor="middle" 
-                      dominant-baseline="middle" fill="#000000">
-                  ${escapeHtml(line)}
-                </text>
-              `;
-            });
-          }
-        }
-      });
-    });
-    
-    // Создаем соединения
-    structure.forEach((node, index) => {
-      const sourceNodeId = `node_${index}_0`;
-      const sourcePos = nodePositions.get(sourceNodeId);
-      
-      if (!sourcePos) return;
-      
-      // Если у узла есть узел справа
-      if (node.right) {
-        const rightNodeIndex = index + 1;
-        const targetNodeId = `node_${index}_right`;
-        let targetPos = nodePositions.get(targetNodeId);
-        
-        // Если не нашли по ID, ищем по следующему индексу
-        if (!targetPos) {
-          targetPos = nodePositions.get(`node_${rightNodeIndex}_0`);
-        }
-        
-        if (targetPos) {
-          const startX = sourcePos.x + sourcePos.width;
-          const startY = sourcePos.y + sourcePos.height / 2;
-          const endX = targetPos.x;
-          const endY = targetPos.y + targetPos.height / 2;
-          
-          svgConnectors += `
-            <line x1="${startX}" y1="${startY}" x2="${endX}" y2="${endY}" 
-                  stroke="#3b82f6" stroke-width="2" marker-end="url(#arrowhead)" />
-          `;
-        }
-      }
-      
-      // Если у узла есть узел снизу
-      if (node.below) {
-        const targetNodeId = `node_${index}_1`;
-        const targetPos = nodePositions.get(targetNodeId);
-        
-        if (targetPos) {
-          const startX = sourcePos.x + sourcePos.width / 2;
-          const startY = sourcePos.y + sourcePos.height;
-          const endX = targetPos.x + targetPos.width / 2;
-          const endY = targetPos.y;
-          
-          svgConnectors += `
-            <line x1="${startX}" y1="${startY}" x2="${endX}" y2="${endY}" 
-                  stroke="#3b82f6" stroke-width="2" marker-end="url(#arrowhead)" />
-          `;
-        }
-      }
-    });
-    
-    return `
-      <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
-        ${arrowMarker}
-        ${svgNodes}
-        ${svgConnectors}
-      </svg>
-    `;
-  };
-
   return (
     <div className="min-h-screen bg-gray-50 py-12 px-4">
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-7xl mx-auto">
         <div className="flex items-center justify-center gap-3 mb-8">
           <FlowChart className="w-8 h-8 text-blue-600" />
           <h1 className="text-3xl font-bold text-gray-900">Text to Flowchart</h1>
@@ -926,133 +830,130 @@ function App() {
           {/* Content for Direct Input Tab */}
           {activeTab === 'direct' && (
             <div>
-              <div className="mb-6">
-                <label htmlFor="input" className="block text-sm font-medium text-gray-700 mb-2">
-                  Enter your process description
-                </label>
-                <textarea
-                  id="input"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  className="w-full h-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Enter a process description and I'll create a flowchart..."
-                />
-              </div>
+          <div className="mb-6">
+            <label htmlFor="input" className="block text-sm font-medium text-gray-700 mb-2">
+              Enter your process description
+            </label>
+            <textarea
+              id="input"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              className="w-full h-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Enter a process description and I'll create a flowchart..."
+            />
+          </div>
 
-              <button
-                onClick={generateFlowchart}
-                disabled={loading || !input.trim()}
-                className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                {loading ? (
-                  <>
-                    <Loader className="w-5 h-5 animate-spin" />
-                    Generating...
-                  </>
-                ) : (
-                  'Generate Flowchart'
-                )}
-              </button>
+              <div className="flex space-x-2">
+          <button
+            onClick={generateFlowchart}
+            disabled={loading || !input.trim()}
+                  className="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 w-full"
+          >
+            {loading ? (
+              <>
+                <Loader className="w-5 h-5 animate-spin" />
+                Generating...
+              </>
+            ) : (
+              'Generate Flowchart'
+            )}
+          </button>
+
+                <button
+                  onClick={addNode}
+                  className="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 flex items-center justify-center gap-2"
+                >
+                  <Plus className="w-5 h-5" />
+                  Add Node
+                </button>
+              </div>
             </div>
           )}
 
           {/* Content for Chat Tab */}
           {activeTab === 'chat' && (
             <div>
-              {/* Chat Messages */}
               <div 
                 ref={chatMessagesRef}
-                className="mb-4 h-60 overflow-y-auto border border-gray-200 rounded-md p-4 bg-gray-50"
+                className="border border-gray-200 rounded-md p-4 h-80 overflow-y-auto mb-4 bg-gray-50 flex flex-col space-y-4"
               >
                 {chatHistory.length === 0 ? (
-                  <div className="flex items-center justify-center h-full text-gray-500">
-                    <p>Начните диалог с ИИ, чтобы создать блок-схему</p>
+                  <div className="text-gray-400 text-center italic mt-32">
+                    Начните общение с ассистентом для создания блок-схем
                   </div>
                 ) : (
                   chatHistory.map((message, index) => (
                     <div 
                       key={index} 
-                      className={`mb-3 ${message.role === 'user' ? 'text-right' : 'text-left'}`}
+                      className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
                     >
                       <div 
-                        className={`inline-block max-w-[80%] p-3 rounded-lg ${
+                        className={`max-w-[80%] rounded-lg p-3 ${
                           message.role === 'user' 
-                            ? 'bg-blue-600 text-white rounded-tr-none' 
-                            : 'bg-gray-200 text-gray-800 rounded-tl-none'
+                            ? 'bg-blue-500 text-white' 
+                            : 'bg-white text-gray-800 border border-gray-200'
                         }`}
                       >
-                        <div className="flex items-center mb-1">
-                          {message.role === 'user' ? (
-                            <>
-                              <span className="font-medium">Вы</span>
-                              <User className="w-4 h-4 ml-1" />
-                            </>
-                          ) : (
-                            <>
-                              <Bot className="w-4 h-4 mr-1" />
-                              <span className="font-medium">ИИ</span>
-                            </>
-                          )}
+                        <div className="flex items-center gap-2 mb-1">
+                          {message.role === 'user' ? 
+                            <User className="w-4 h-4" /> : 
+                            <Bot className="w-4 h-4" />
+                          }
+                          <span className="font-semibold">
+                            {message.role === 'user' ? 'Вы' : 'Ассистент'}
+                          </span>
                         </div>
-                        <div className="whitespace-pre-wrap">
-                          {message.content.includes('FLOWCHART:') ? (
-                            <>
-                              {message.content.split('FLOWCHART:')[0]}
-                              <div className="bg-blue-100 p-2 rounded mt-1 text-gray-800">
-                                Создана блок-схема на основе указанных шагов
-                              </div>
-                            </>
-                          ) : message.content.includes('COMPLEX_FLOWCHART:') ? (
-                            <>
-                              {message.content.split('COMPLEX_FLOWCHART:')[0]}
-                              <div className="bg-blue-100 p-2 rounded mt-1 text-gray-800">
-                                Создана сложная блок-схема с указанными связями
-                              </div>
-                            </>
-                          ) : (
-                            message.content
-                          )}
-                        </div>
+                        <div className="whitespace-pre-wrap">{message.content}</div>
                       </div>
                     </div>
                   ))
                 )}
               </div>
 
-              {/* Chat Input */}
-              <div className="flex">
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && sendChatMessage()}
-                  placeholder="Напишите вопрос или описание блок-схемы..."
-                  className="flex-1 p-2 border border-gray-300 rounded-l-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              <div className="flex items-center border border-gray-300 rounded-md overflow-hidden">
+                <textarea 
+                  value={chatInput} 
+                  onChange={e => setChatInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }
+                  }}
+                  placeholder="Спросите что-нибудь о создании блок-схем..." 
+                  className="flex-grow px-3 py-2 focus:outline-none resize-none h-12"
                 />
-                <button
-                  onClick={sendChatMessage}
+                <button 
+                  onClick={handleSendMessage}
                   disabled={loading || !chatInput.trim()}
-                  className="bg-blue-600 text-white p-2 rounded-r-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="bg-blue-600 text-white p-3 h-12 w-12 flex items-center justify-center disabled:opacity-50"
                 >
-                  {loading ? (
-                    <Loader className="w-5 h-5 animate-spin" />
-                  ) : (
-                    <Send className="w-5 h-5" />
-                  )}
+                  {loading ? <Loader className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
                 </button>
               </div>
             </div>
           )}
 
+          {/* Error Message */}
           {error && (
-            <div className="mt-4 text-red-600 text-sm">
-              {error}
-            </div>
+            <div className="mt-4 text-red-500 text-sm">{error}</div>
           )}
 
-          {/* Flowchart Display Area (visible for both tabs) */}
-          <div className="mt-8">
-            <div ref={diagramRef} className="overflow-x-auto"/>
+          {/* ReactFlow Canvas */}
+          <div className="mt-8 rounded-md border border-gray-300 h-[60vh]">
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              fitView
+              attributionPosition="bottom-right"
+            >
+              <Controls />
+              <MiniMap />
+              <Background />
+            </ReactFlow>
           </div>
         </div>
       </div>
