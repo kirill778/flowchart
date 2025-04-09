@@ -1,5 +1,5 @@
-import React, { useState, useRef, useCallback } from 'react';
-import { BarChart as FlowChart, Loader, Send, User, Bot, Plus } from 'lucide-react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { BarChart as FlowChart, Loader, Send, User, Bot, Plus, Edit, Trash2, CheckCircle, XCircle } from 'lucide-react';
 import ReactFlow, { 
   Background, 
   Controls, 
@@ -10,7 +10,9 @@ import ReactFlow, {
   Node,
   Edge,
   Connection,
-  MarkerType
+  MarkerType,
+  NodeMouseHandler,
+  ReactFlowProvider
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 
@@ -19,17 +21,18 @@ interface ChatMessage {
   content: string;
 }
 
-// Стандартный стиль для узлов
+// Упрощенный стиль для узлов
 const nodeDefaultStyle = {
-  background: '#f0f9ff',
-  color: '#000000',
-  border: '2px solid #3b82f6',
-  borderRadius: '8px',
-  width: 180,
-  padding: 10,
+  background: '#ffffff', // Белый фон
+  color: '#1f2937', // Темно-серый текст
+  border: '1px solid #9ca3af', // Серая рамка
+  borderRadius: '4px', // Меньше скругление
+  width: 180, // Немного уже
+  minHeight: 60, // Немного ниже
+  padding: '8px 10px', // Меньше вертикальные отступы
 };
 
-function App() {
+function FlowchartApp() {
   const [input, setInput] = useState('');
   const [chatInput, setChatInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -37,6 +40,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<'direct' | 'chat'>('direct');
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [modelType, setModelType] = useState<'gemini' | 'ollama'>('ollama');
+  const [ollamaStatus, setOllamaStatus] = useState<'unknown' | 'connected' | 'disconnected'>('unknown');
   const chatMessagesRef = useRef<HTMLDivElement>(null);
   
   // ReactFlow состояние
@@ -51,6 +55,10 @@ function App() {
   // Default to "us" region, can be changed as needed
   const region = "us";
 
+  // Состояние для редактирования узла
+  const [editingNode, setEditingNode] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState('');
+  
   // Прокрутка чата вниз при добавлении новых сообщений
   React.useEffect(() => {
     if (chatMessagesRef.current) {
@@ -63,26 +71,83 @@ function App() {
     setEdges((eds) => 
       addEdge({
         ...params,
-        type: 'smoothstep',
+        type: 'straight', // Используем прямые линии вместо smoothstep
         markerEnd: {
           type: MarkerType.ArrowClosed,
           width: 20,
           height: 20,
-          color: '#3b82f6',
+          color: '#dc2626', // Используем красный цвет для заметности
         },
-        style: { stroke: '#3b82f6', strokeWidth: 2 }
+        style: { 
+          stroke: '#ef4444', // Красный цвет линии
+          strokeWidth: 3,    // Толщина линии
+          zIndex: 1000       // Поднимаем наверх
+        }
       }, eds)
     );
   }, [setEdges]);
 
-  // Функция для добавления нового узла
+  // Обработчик для начала редактирования узла при двойном клике
+  const onNodeDoubleClick: NodeMouseHandler = useCallback((event, node) => {
+    event.preventDefault();
+    setEditingNode(node.id);
+    setEditingText(node.data.label);
+  }, []);
+
+  // Обработчик для обновления текста узла
+  const updateNodeText = useCallback(() => {
+    if (!editingNode) return;
+
+    setNodes((nds) =>
+      nds.map((node) => {
+        if (node.id === editingNode) {
+          // Сохраняем существующие обработчики при обновлении данных узла
+          const currentHandlers = {
+            onEdit: node.data.onEdit,
+            onDelete: node.data.onDelete
+          };
+          
+          return {
+            ...node,
+            data: { 
+              label: editingText,
+              onEdit: currentHandlers.onEdit,
+              onDelete: currentHandlers.onDelete
+            },
+          };
+        }
+        return node;
+      })
+    );
+    setEditingNode(null);
+  }, [editingNode, editingText, setNodes]);
+
+  // Функция для удаления узла
+  const deleteNode = useCallback((nodeId: string) => {
+    // Удаляем узел
+    setNodes((nds) => nds.filter((node) => node.id !== nodeId));
+    
+    // Удаляем связанные с узлом рёбра
+    setEdges((eds) => 
+      eds.filter((edge) => edge.source !== nodeId && edge.target !== nodeId)
+    );
+  }, [setNodes, setEdges]);
+
+  // Функция для создания нового узла
   const addNode = () => {
     const id = `node-${nextNodeId}`;
     const newNode: Node = {
       id,
       type: 'default',
       position: { x: 100, y: nextNodeId * 100 },
-      data: { label: 'Новый блок' },
+      data: { 
+        label: 'Новый блок',
+        onEdit: () => {
+          setEditingNode(id);
+          setEditingText('Новый блок');
+        },
+        onDelete: () => deleteNode(id)
+      },
       style: nodeDefaultStyle,
     };
 
@@ -96,9 +161,9 @@ function App() {
     
     console.log(`Переорганизация блок-схемы в ${isHorizontal ? 'горизонтальный' : 'вертикальный'} вид`);
     
-    const nodeWidth = 200;
-    const nodeHeight = 80;
-    const gap = 100;
+    const nodeWidth = 180; // Более компактная ширина
+    const nodeHeight = 70; // Более компактная высота
+    const gap = 80;        // Меньший отступ между блоками
     
     // Создаем новый массив узлов с обновленными позициями
     const updatedNodes = nodes.map((node, index) => {
@@ -120,8 +185,57 @@ function App() {
       };
     });
     
+    // Пересоздаем соединения между узлами
+    const newEdges: Edge[] = [];
+    
+    // Добавляем соединения между последовательными узлами
+    for (let i = 0; i < updatedNodes.length - 1; i++) {
+      const sourceId = updatedNodes[i].id;
+      const targetId = updatedNodes[i + 1].id;
+      
+      const edge: Edge = {
+        id: `edge-${i}-${i+1}`,
+        source: sourceId,
+        target: targetId,
+        type: 'default',
+        animated: true,
+        label: '',
+        labelBgPadding: [8, 4],
+        labelBgBorderRadius: 4,
+        style: { 
+          stroke: '#2563eb',
+          strokeWidth: 4
+        },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          width: 25,
+          height: 25,
+          color: '#2563eb',
+        }
+      };
+      
+      newEdges.push(edge);
+    }
+    
     // Обновляем положение узлов
     setNodes(updatedNodes);
+    
+    // Сначала очистим все соединения
+    setEdges([]);
+    
+    // Затем через задержку добавим новые
+    setTimeout(() => {
+      console.log("Устанавливаю соединения после переорганизации:", newEdges);
+      setEdges(newEdges);
+      
+      // И еще раз для надежности
+      setTimeout(() => {
+        if (newEdges.length > 0) {
+          console.log("Повторная установка соединений после переорганизации");
+          setEdges([...newEdges]);
+        }
+      }, 300);
+    }, 200);
   };
 
   const generateFlowchart = async () => {
@@ -158,27 +272,35 @@ function App() {
       console.log("Sending request to API...");
       
       let apiUrl: string;
-      let requestBody: any;
       let responseText: string;
       
       if (modelType === 'ollama') {
         // Используем локальный Ollama API
         apiUrl = `${OLLAMA_URL}/api/chat`;
         
-        // Подготавливаем инструкцию для Ollama
-        const systemPrompt = `Ты - помощник для создания блок-схем. 
-        Проанализируй текст пользователя и разбей его на логические шаги процесса, разделенные переносами строк.
-        Если текст описывает процесс с шагами, выдели эти шаги в порядке их выполнения. 
-        Возвращай ТОЛЬКО список шагов, по одному на строку, БЕЗ нумерации, дополнительных комментариев или описаний.`;
+        const systemPrompt = `Ты - помощник для создания блок-схем и диаграмм процессов.
+Когда пользователь просит создать блок-схему или диаграмму, следуй этим правилам:
+1. Всегда форматируй каждый шаг как "Шаг N: Описание шага", где N - номер шага.
+2. Каждый шаг должен быть на отдельной строке.
+3. Шаги должны быть короткими и ясными (не более 10-15 слов).
+4. Для описания процесса используй от 2 до 7 шагов.
+5. Шаги должны быть строго в формате "Шаг N: Описание", без дополнительных деталей.
+6. В начале ответа допустимо коротко подтвердить, что создаешь схему.
+7. НЕ ИСПОЛЬЗУЙ маркдаун, код или специальные форматы - только текст.
+
+Пример хорошего ответа:
+
+Хорошо, создаю схему приготовления чая.
+Шаг 1: Вскипятить воду.
+Шаг 2: Положить чайный пакетик в чашку.
+Шаг 3: Залить кипятком.
+Шаг 4: Дать настояться 5 минут.
+Шаг 5: Добавить сахар по вкусу.`;
         
-        requestBody = {
-          model: OLLAMA_MODEL,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: input }
-          ],
-          stream: false
-        };
+        const messages = [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: input }
+        ];
         
         console.log("Sending request to Ollama...");
         const response = await fetch(apiUrl, {
@@ -186,7 +308,11 @@ function App() {
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(requestBody),
+          body: JSON.stringify({
+            model: OLLAMA_MODEL,
+            messages: messages,
+            stream: false
+          }),
         });
         
         if (!response.ok) {
@@ -200,29 +326,28 @@ function App() {
         // Google Gemini API call
         // Обратите внимание: ниже просто заглушка, необходимо заменить реальным вызовом Gemini API
         apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=YOUR_API_KEY`;
-        requestBody = {
-          contents: [
-            {
-              parts: [
-                {
-                  text: `Create a flowchart from this text. Return only the steps, one per line, without numbering:
-                  ${input}`
-                }
-              ]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 1024,
-          }
-        };
         
         const response = await fetch(apiUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(requestBody),
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  {
+                    text: `Create a flowchart from this text. Return only the steps, one per line, each step formatted as "Step N: description":
+                    ${input}`
+                  }
+                ]
+              }
+            ],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 1024,
+            }
+          }),
         });
 
       if (!response.ok) {
@@ -237,151 +362,66 @@ function App() {
         throw new Error('No text content in the API response');
       }
 
-      const steps = responseText
-        .split('\n')
-        .filter(Boolean)
-        .map((step: string) => step.trim())
-        .filter((step: string) => step.length > 0);
-
-      console.log("Processed steps:", steps);
-
-      if (steps.length === 0) {
-        throw new Error('No valid steps generated');
-      }
-
-      // Generate flowchart nodes from steps
-      generateFlowFromSteps(steps, isHorizontal);
+      // ИЗВЛЕЧЕНИЕ ШАГОВ ИЗ ОТВЕТА МОДЕЛИ
+      console.log("===== Обрабатываем ответ модели для создания блок-схемы =====");
+      console.log("Полный ответ модели:", responseText);
       
+      // Разбиваем ответ на строки
+      const responseLines = responseText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+      console.log("Все строки ответа:", responseLines);
+      
+      // Ищем строки в формате "Шаг N: текст"
+      const stepLines: string[] = [];
+      
+      for (const line of responseLines) {
+        // Используем регулярное выражение для извлечения шагов
+        const match = line.match(/^шаг\s+(\d+)\s*:\s*(.+)$/i);
+        if (match && match[2]) {
+          const stepContent = match[2].trim();
+          console.log(`Найден шаг ${match[1]}: "${stepContent}"`);
+          stepLines.push(stepContent);
+        }
+      }
+      
+      console.log("Извлечено шагов:", stepLines.length, stepLines);
+      
+      // Если нашли хотя бы один шаг, создаем блок-схему
+      if (stepLines.length > 0) {
+        console.log("Создаем блок-схему из извлеченных шагов");
+        generateFlowFromSteps(stepLines, isHorizontal);
+      } else {
+        console.log("Шаги не найдены, используем базовую обработку");
+        
+        // Если шаги не найдены, пробуем простой вариант - разбить по строкам
+        if (responseLines.length > 1) {
+          console.log("Используем строки как шаги:", responseLines);
+          generateFlowFromSteps(responseLines, isHorizontal);
+        } else {
+          setError("Не удалось распознать шаги в ответе модели. Попробуйте изменить запрос.");
+        }
+      }
     } catch (fetchError) {
       console.error("Fetch error:", fetchError);
       
-      // More robust fallback processing
-      let fallbackSteps: string[] = [];
-      let isHorizontal = false;
-      let hasSpecialStructure = false;
-      let flowchartStructure: Array<{ text: string, right?: string, below?: string }> = [];
-      
-      // Check for numbered list (1. Step One, 2. Step Two...)
-      const numberedPattern = /^\d+\.\s+.+/;
-      const numberedLines = input
-        .split('\n')
-        .filter(line => numberedPattern.test(line.trim()));
-        
-      if (numberedLines.length > 1) {
-        console.log("Found numbered list format");
-        fallbackSteps = numberedLines.map(line => 
-          line.trim().replace(/^\d+\.\s+/, '')
-        );
-      } 
-      
-      // Check for bullet points
-      else if (input.includes('•') || input.includes('*') || input.includes('-')) {
-        console.log("Found bullet points format");
-        fallbackSteps = input
-          .split(/[•*-]/)
-          .filter(Boolean)
-          .map(s => s.trim())
-          .filter(s => s.length > 0);
-        
-        // For dash-separated format, make it horizontal
-        if (input.includes('-') && !input.includes('•') && !input.includes('*')) {
-          isHorizontal = true;
-        }
-      }
-      
-      // Check for sentences ending with periods
-      else {
-        console.log("Trying sentence-based parsing");
-        
-        // Split by periods, but be careful with numbers like 1.5
-        // This regex looks for periods followed by a space or end of string
-        const sentenceRegex = /\.\s+|\.\s*$/;
-        const sentences = input.split(sentenceRegex);
-        
-        fallbackSteps = sentences
-          .filter(Boolean)
-          .map(s => s.trim())
-          .filter(s => s.length > 0);
-      }
-      
-      // Simple check for "A -> B" or "A → B" type connections
-      if (input.includes('->') || input.includes('→')) {
-        console.log("Found arrow notation, treating as horizontal flow");
-        
-        // Split by arrows
-        const arrowSplit = input
-          .split(/->|→/)
-          .filter(Boolean)
-          .map(s => s.trim())
-          .filter(s => s.length > 0);
+      // Fallback processing
+      try {
+        const fallbackSteps = input
+          .split(/[\n\r\.\;\-]/)
+          .map(line => line.trim())
+          .filter(line => line.length > 3);
           
-        if (arrowSplit.length > 1) {
-          fallbackSteps = arrowSplit;
-          isHorizontal = true;
+        if (fallbackSteps.length > 0) {
+          console.log("Using fallback processing with user input:", fallbackSteps);
+          generateFlowFromSteps(fallbackSteps, false);
+          setError("Note: Using basic processing due to API connection issue. For better results, check your Ollama server.");
+        } else {
+          generateFlowFromSteps([input.trim()], false);
+          setError("Unable to process input. Please check your Ollama server connection.");
         }
-      }
-      
-      // Check for complex flow structure with "if/then" statements
-      if (input.toLowerCase().includes('if') && 
-          (input.toLowerCase().includes('then') || input.toLowerCase().includes('else'))) {
-        console.log("Detected conditional flow");
-        
-        // Very simple parsing for simple if/then/else structures
-        // This is a very basic implementation and won't catch all cases
-        const lines = input.split('\n').filter(Boolean).map(line => line.trim());
-        
-        // Reset structure
-        flowchartStructure = [];
-        hasSpecialStructure = true;
-        
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i].toLowerCase();
-          
-          if (line.includes('if')) {
-            // Current line has if
-            const ifText = lines[i];
-            
-            // Check for then in this line or next
-            if (i+1 < lines.length) {
-              const thenText = lines[i+1];
-              flowchartStructure.push({
-                text: ifText,
-                right: thenText.toLowerCase().includes('then') ? thenText : undefined,
-                below: thenText.toLowerCase().includes('else') ? thenText : 
-                      (i+2 < lines.length && lines[i+2].toLowerCase().includes('else')) ? 
-                      lines[i+2] : undefined
-              });
-            } else {
-              // Just add as a single node if there's no following line
-              flowchartStructure.push({ text: ifText });
-            }
-          } else if (!line.includes('then') && !line.includes('else') && 
-                    !lines[i-1]?.toLowerCase().includes('if')) {
-            // Line that's not part of a conditional, add as standalone
-            flowchartStructure.push({ text: lines[i] });
-          }
-          // Skip lines that are 'then' or 'else' as we've already handled them
-        }
-        
-        console.log("Flow structure:", flowchartStructure);
-      }
-      
-      // Check if we have a valid structure
-      if (hasSpecialStructure && flowchartStructure.length > 0) {
-        // Generate complex flowchart
-        generateComplexFlowchart(flowchartStructure);
-      } 
-      // If no special structure but we have steps from fallback parsing
-      else if (fallbackSteps.length > 0) {
-        console.log("Using fallback steps:", fallbackSteps, "isHorizontal:", isHorizontal);
-        generateFlowFromSteps(fallbackSteps, isHorizontal);
-        setError("Note: Using basic processing due to API connection issue. For better results, check your internet connection.");
-      } 
-      // If no splits worked, just use the whole input as one step
-      else {
-        fallbackSteps = [input.trim()];
-        generateFlowFromSteps(fallbackSteps, false);
-        setError("Note: Using basic processing due to API connection issue. For better results, check your internet connection.");
+      } catch (processingError) {
+        console.error("Processing error:", processingError);
+        generateFlowFromSteps([input.trim()], false);
+        setError("Error processing input. Using the entire text as a single step.");
       }
     } finally {
       setLoading(false);
@@ -398,9 +438,9 @@ function App() {
     const newEdges: Edge[] = [];
     
     // Определяем общие размеры для расчета позиций
-    const nodeWidth = 200;
-    const nodeHeight = 80;
-    const gap = 100;
+    const nodeWidth = 180; // Более компактная ширина
+    const nodeHeight = 70; // Более компактная высота
+    const gap = 80;        // Меньший отступ между блоками
     
     console.log(`Генерирую ${steps.length} блоков для шагов:`, steps);
     
@@ -435,35 +475,72 @@ function App() {
         id,
         type: 'default',
         position: { x: positionX, y: positionY },
-        data: { label: step },
+        data: { 
+          label: step,
+          onEdit: () => {
+            console.log("Edit node called for:", id);
+            setEditingNode(id);
+            setEditingText(step);
+          },
+          onDelete: () => {
+            console.log("Delete node called for:", id);
+            deleteNode(id);
+          }
+        },
         style: nodeDefaultStyle,
       };
       
       newNodes.push(newNode);
-      
-      // Создаем соединение с предыдущим узлом
-      if (index > 0) {
-        const newEdge: Edge = {
-          id: `edge-${index-1}-${index}`,
-          source: `node-${index-1}`,
-          target: id,
-          type: 'smoothstep',
-          markerEnd: {
-            type: MarkerType.ArrowClosed,
-            width: 20,
-            height: 20,
-            color: '#3b82f6',
-          },
-          style: { stroke: '#3b82f6', strokeWidth: 2 }
-        };
-        
-        newEdges.push(newEdge);
-      }
     });
     
-    // Устанавливаем новые узлы и соединения
+    // Создаем соединения между узлами отдельным циклом
+    for (let i = 0; i < processedSteps.length - 1; i++) {
+      const sourceId = `node-${i}`;
+      const targetId = `node-${i + 1}`;
+      
+      const edge: Edge = {
+        id: `edge-${i}-${i+1}`,
+        source: sourceId,
+        target: targetId,
+        type: 'default', // Используем дефолтные линии для совместимости
+        animated: true,  // Анимация для заметности
+        label: '', // Пустой текст, чтобы создать якорь для стрелки
+        labelBgPadding: [8, 4],
+        labelBgBorderRadius: 4,
+        style: { 
+          stroke: '#2563eb', // Синий цвет
+          strokeWidth: 4,    // Толщина
+        },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          width: 25,
+          height: 25,
+          color: '#2563eb',
+        }
+      };
+      
+      console.log("Создаю соединение:", edge);
+      newEdges.push(edge);
+    }
+    
+    // Сделаем двойное обновление edges для надежности
     setNodes(newNodes);
-    setEdges(newEdges);
+    // Сначала очистим все соединения
+    setEdges([]);
+    
+    // Затем через задержку добавим новые
+    setTimeout(() => {
+      console.log("Устанавливаю соединения:", newEdges);
+      setEdges(newEdges);
+      
+      // И еще раз для надежности
+      setTimeout(() => {
+        if (newEdges.length > 0) {
+          console.log("Повторная установка соединений");
+          setEdges([...newEdges]);
+        }
+      }, 300);
+    }, 200);
     
     // Обновляем счетчик узлов для будущих ручных добавлений
     setNextNodeId(processedSteps.length + 1);
@@ -496,7 +573,14 @@ function App() {
         id: mainId,
         type: 'default',
         position: { x: 250, y: index * (nodeHeight + gapY) + 50 },
-        data: { label: node.text },
+        data: { 
+          label: node.text,
+          onEdit: () => {
+            setEditingNode(mainId);
+            setEditingText(node.text);
+          },
+          onDelete: () => deleteNode(mainId)
+        },
         style: nodeDefaultStyle,
       });
       
@@ -509,7 +593,14 @@ function App() {
           id: rightId,
           type: 'default',
           position: { x: 250 + nodeWidth + gapX, y: index * (nodeHeight + gapY) + 50 },
-          data: { label: node.right },
+          data: { 
+            label: node.right,
+            onEdit: () => {
+              setEditingNode(rightId);
+              setEditingText(node.right || '');
+            },
+            onDelete: () => deleteNode(rightId)
+          },
           style: nodeDefaultStyle,
         });
         
@@ -538,7 +629,14 @@ function App() {
           id: belowId,
           type: 'default',
           position: { x: 250, y: index * (nodeHeight + gapY) + 50 + nodeHeight + gapY/2 },
-          data: { label: node.below },
+          data: { 
+            label: node.below,
+            onEdit: () => {
+              setEditingNode(belowId);
+              setEditingText(node.below || '');
+            },
+            onDelete: () => deleteNode(belowId)
+          },
           style: nodeDefaultStyle,
         });
         
@@ -593,42 +691,7 @@ function App() {
       content: chatInput
     };
     
-    // Сначала проверим запрос пользователя на наличие упоминаний шагов
-    const userSteps: string[] = [];
-    const userInputText = chatInput.trim();
-    
-    // Поиск шагов в формате "Шаг 1", "Шаг 2", и т.д.
-    const stepRegex = /Шаг\s+(\d+)/gi;
-    let match;
-    let matchFound = false;
-    
-    while ((match = stepRegex.exec(userInputText)) !== null) {
-      matchFound = true;
-      userSteps.push(`Шаг ${match[1]}`);
-    }
-    
-    // Проверяем, содержит ли запрос команду изменения ориентации схемы
-    const hasVerticalCommand = /верти(кальн|кал)/i.test(userInputText);
-    const hasHorizontalCommand = /гориз(онтальн|онтал)/i.test(userInputText);
-    
-    // Если это команда изменения ориентации существующей схемы
-    if (nodes.length > 0 && (hasVerticalCommand || hasHorizontalCommand)) {
-      setChatHistory(prev => [...prev, userMessage]);
-      setChatInput('');
-      
-      // Переорганизуем блок-схему
-      rearrangeFlowchart(hasHorizontalCommand);
-      
-      // Добавляем ответ ассистента
-      const systemResponse: ChatMessage = {
-        role: 'assistant',
-        content: `Готово! Блок-схема переорганизована в ${hasHorizontalCommand ? 'горизонтальный' : 'вертикальный'} вид.`
-      };
-      
-      setChatHistory(prev => [...prev, systemResponse]);
-      return;
-    }
-    
+    // Добавляем сообщение пользователя в историю чата
     setChatHistory(prev => [...prev, userMessage]);
     setChatInput('');
     setLoading(true);
@@ -640,12 +703,24 @@ function App() {
         // Используем локальный Ollama API
         const apiUrl = `${OLLAMA_URL}/api/chat`;
         
-        const systemPrompt = "Ты - помощник для создания блок-схем, диаграмм процессов. " + 
-                           "Помогай пользователю анализировать процессы и разбивать их на шаги. " +
-                           "Если пользователь упоминает конкретные шаги (например, 'Шаг 1', 'Шаг 2'), трактуй это буквально, " +
-                           "не пытайся интерпретировать это как просьбу объяснить процесс. " +
-                           "Если пользователь просит создать блок-схему с конкретными шагами, просто подтверди, что создаешь эти конкретные шаги. " +
-                           "Не используй mermaid или другие специальные форматы кода в ответе - просто указывай шаги обычным текстом.";
+        const systemPrompt = `Ты - помощник для создания блок-схем и диаграмм процессов.
+Когда пользователь просит создать блок-схему или диаграмму, следуй этим правилам:
+1. Всегда форматируй каждый шаг как "Шаг N: Описание шага", где N - номер шага.
+2. Каждый шаг должен быть на отдельной строке.
+3. Шаги должны быть короткими и ясными (не более 10-15 слов).
+4. Для описания процесса используй от 2 до 7 шагов.
+5. Шаги должны быть строго в формате "Шаг N: Описание", без дополнительных деталей.
+6. В начале ответа допустимо коротко подтвердить, что создаешь схему.
+7. НЕ ИСПОЛЬЗУЙ маркдаун, код или специальные форматы - только текст.
+
+Пример хорошего ответа:
+
+Хорошо, создаю схему приготовления чая.
+Шаг 1: Вскипятить воду.
+Шаг 2: Положить чайный пакетик в чашку.
+Шаг 3: Залить кипятком.
+Шаг 4: Дать настояться 5 минут.
+Шаг 5: Добавить сахар по вкусу.`;
         
         const messages = [
           { role: "system", content: systemPrompt },
@@ -683,86 +758,40 @@ function App() {
       
       setChatHistory(prev => [...prev, assistantMessage]);
       
-      // Проверяем, содержит ли запрос или ответ команду изменения ориентации
-      if (hasVerticalCommand || hasHorizontalCommand || 
-          /вертик/i.test(responseText) || /гориз/i.test(responseText)) {
-        
-        // Если у нас есть существующие блоки, меняем их ориентацию
-        if (nodes.length > 0) {
-          rearrangeFlowchart(hasHorizontalCommand || /гориз/i.test(responseText));
+      // Проверка ориентации
+      const hasVerticalCommand = /верти(кальн|кал)/i.test(chatInput) || /верти(кальн|кал)/i.test(responseText);
+      const hasHorizontalCommand = /гориз(онтальн|онтал)/i.test(chatInput) || /гориз(онтальн|онтал)/i.test(responseText);
+      const isHorizontal = hasHorizontalCommand;
+      
+      // ИЗВЛЕЧЕНИЕ ШАГОВ ИЗ ОТВЕТА АССИСТЕНТА
+      console.log("===== Обрабатываем ответ ассистента для создания блок-схемы =====");
+      console.log("Полный ответ модели:", responseText);
+      
+      // Разбиваем ответ на строки
+      const responseLines = responseText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+      console.log("Все строки ответа:", responseLines);
+      
+      // Ищем строки в формате "Шаг N: текст"
+      const stepLines: string[] = [];
+      
+      for (const line of responseLines) {
+        // Используем более точное регулярное выражение для извлечения шагов
+        const match = line.match(/^шаг\s+(\d+)\s*:\s*(.+)$/i);
+        if (match && match[2]) {
+          const stepContent = match[2].trim();
+          console.log(`Найден шаг ${match[1]}: "${stepContent}"`);
+          stepLines.push(stepContent);
         }
       }
       
-      // Если в запросе пользователя были найдены упоминания шагов, используем их напрямую
-      if (matchFound && userSteps.length > 0) {
-        console.log("Создаю блок-схему на основе шагов из запроса пользователя:", userSteps);
-        // Очищаем предыдущие блоки и создаем новые на основе найденных шагов
-        generateFlowFromSteps(userSteps, hasHorizontalCommand);
-      } else if (userInputText.toLowerCase().includes('шаг') && 
-                !(/шаг\s+\d+/i.test(userInputText))) {
-        // Если пользователь упоминает слово "шаг", но не в формате "Шаг N", используем весь текст
-        console.log("Создаю один блок с полным текстом запроса:", userInputText);
-        generateFlowFromSteps([userInputText], hasHorizontalCommand);
+      console.log("Извлечено шагов:", stepLines.length, stepLines);
+      
+      // Если нашли хотя бы один шаг, создаем блок-схему
+      if (stepLines.length > 0) {
+        console.log("Создаем блок-схему из извлеченных шагов");
+        generateFlowFromSteps(stepLines, isHorizontal);
       } else {
-        // Если не нашли шаги в запросе пользователя, анализируем ответ ассистента
-
-        // Сначала проверим на наличие шагов формата "Шаг N" в ответе
-        const stepRgxInResponse = /Шаг\s+(\d+)/gi;
-        const matches: RegExpExecArray[] = [];
-        let stepMatch;
-        
-        // Собираем все совпадения в массив
-        while ((stepMatch = stepRgxInResponse.exec(responseText)) !== null) {
-          matches.push(stepMatch);
-        }
-        
-        if (matches.length > 0) {
-          console.log("Найдены упоминания шагов в ответе:", matches.length);
-          
-          // Если нашли шаги формата "Шаг N", проверяем, есть ли у них описание
-          const steps: string[] = [];
-          const lines = responseText.split('\n').map(line => line.trim()).filter(Boolean);
-          
-          if (lines.length > matches.length) {
-            // Есть больше строк чем шагов - вероятно, есть описания
-            for (const line of lines) {
-              if (line.length > 0 && !line.startsWith('```')) {
-                steps.push(line);
-              }
-            }
-          } else {
-            // Если строк меньше или столько же, просто используем найденные шаги
-            for (const match of matches) {
-              steps.push(match[0]); // match[0] содержит полное совпадение, например "Шаг 1"
-            }
-          }
-          
-          console.log("Создаю блок-схему на основе обработанных строк:", steps);
-          generateFlowFromSteps(steps, hasHorizontalCommand);
-        } else {
-          // Если не нашли упоминания шагов, пробуем разбить текст по переносам строк
-          const steps = responseText
-            .split('\n')
-            .filter(Boolean)
-            .map((step: string) => step.trim())
-            .filter((step: string) => 
-              step.length > 0 && 
-              !step.startsWith('```') && 
-              !step.startsWith('`mermaid') && 
-              !step.startsWith('graph') && 
-              !step.startsWith('A[') && 
-              step !== '"mermaid"'
-            );
-          
-          if (steps.length > 0) {
-            console.log("Создаю блок-схему на основе строк ответа:", steps);
-            generateFlowFromSteps(steps, hasHorizontalCommand);
-          } else if (responseText.trim().length > 0) {
-            // Если после фильтрации не осталось шагов, но есть текст, используем весь текст
-            console.log("Создаю один блок с ответом ассистента");
-            generateFlowFromSteps([responseText.trim()], hasHorizontalCommand);
-          }
-        }
+        console.log("Шаги не найдены, не создаем блок-схему");
       }
     } catch (error) {
       console.error('Chat error:', error);
@@ -789,6 +818,176 @@ function App() {
       .replace(/'/g, "&#039;");
   };
 
+  // Создаем кастомный узел с кнопками редактирования и удаления
+  const CustomNode = ({ id, data }: { id: string; data: any }) => {
+    const handleEdit = (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log("Editing node:", id);
+      if (data.onEdit) data.onEdit();
+    };
+
+    const handleDelete = (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log("Deleting node:", id);
+      if (data.onDelete) data.onDelete();
+    };
+
+    // Форматирование текста с переносами
+    const formatText = (text: string) => {
+      if (!text) return '';
+      return text.split('\n').map((line, i) => (
+        <React.Fragment key={i}>
+          {line}
+          {i < text.split('\n').length - 1 && <br />}
+        </React.Fragment>
+      ));
+    };
+
+    return (
+      <div className="relative group bg-white rounded border border-gray-400 w-full h-full min-h-[60px] flex flex-col shadow-sm hover:shadow-md transition-shadow duration-150">
+        {/* Упрощенные кнопки - появляются при наведении */}
+        <div className="absolute right-0 top-0 flex opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+          <button
+            className="p-0.5 bg-gray-100 hover:bg-gray-200 rounded-bl-sm z-10"
+            onClick={handleEdit}
+            title="Редактировать"
+          >
+            <Edit className="w-3.5 h-3.5 text-gray-600" />
+          </button>
+          <button
+            className="p-0.5 bg-red-100 hover:bg-red-200 rounded-tr-sm z-10"
+            onClick={handleDelete}
+            title="Удалить"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-red-600" />
+          </button>
+        </div>
+        {/* Упрощенный текст */}
+        <div className="p-2 flex-1 flex items-center justify-center text-center text-sm text-gray-700 overflow-hidden">
+          {formatText(data.label)}
+        </div>
+      </div>
+    );
+  };
+
+  // Используем useMemo для создания nodeTypes, чтобы он не пересоздавался при каждом рендере
+  const nodeTypes = React.useMemo(() => ({ 
+    default: CustomNode 
+  }), []);
+
+  // Создаем дефолтные узлы, если их нет
+  React.useEffect(() => {
+    if (nodes.length === 0 && edges.length === 0) {
+      // Можно добавить приветственный узел
+      const welcomeNode: Node = {
+        id: 'welcome',
+        type: 'default',
+        position: { x: 250, y: 150 },
+        data: { 
+          label: 'Добро пожаловать! \nДобавьте новые блоки или создайте блок-схему с помощью чата или прямого ввода.',
+          onEdit: () => {
+            console.log("Welcome node edit called");
+            setEditingNode('welcome');
+            setEditingText('Добро пожаловать! \nДобавьте новые блоки или создайте блок-схему с помощью чата или прямого ввода.');
+          },
+          onDelete: () => {
+            console.log("Welcome node delete called");
+            deleteNode('welcome');
+          }
+        },
+        style: { ...nodeDefaultStyle, width: 350 },
+      };
+      setNodes([welcomeNode]);
+    }
+  }, []);
+
+  // Проверка состояния подключения к Ollama
+  const checkOllamaConnection = useCallback(async () => {
+    if (modelType !== 'ollama') return;
+    
+    try {
+      setOllamaStatus('unknown');
+      const response = await fetch(`${OLLAMA_URL}/api/tags`, { 
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (response.ok) {
+        console.log("Ollama server is connected");
+        setOllamaStatus('connected');
+        setError('');
+      } else {
+        console.error("Ollama connection failed:", response.status);
+        setOllamaStatus('disconnected');
+        setError('Ошибка подключения к Ollama серверу. Убедитесь, что сервер запущен на http://localhost:11434');
+      }
+    } catch (e) {
+      console.error("Ollama connection error:", e);
+      setOllamaStatus('disconnected');
+      setError('Ошибка подключения к Ollama серверу. Убедитесь, что сервер запущен на http://localhost:11434');
+    }
+  }, [modelType]);
+  
+  // Проверяем соединение при загрузке и при изменении типа модели
+  useEffect(() => {
+    checkOllamaConnection();
+  }, [modelType, checkOllamaConnection]);
+
+  // Обеспечиваем корректные соединения между узлами при их изменении
+  useEffect(() => {
+    // Если у нас есть хотя бы 2 узла, но нет соединений, восстанавливаем их
+    if (nodes.length >= 2 && edges.length === 0) {
+      console.log("Обнаружены узлы без соединений, восстанавливаем стрелки...");
+      
+      const newEdges: Edge[] = [];
+      
+      // Сортируем узлы по вертикальной или горизонтальной позиции
+      const sortedNodes = [...nodes].sort((a, b) => {
+        // Определяем ориентацию по расположению узлов
+        const isHorizontal = Math.abs(a.position.y - b.position.y) < 50;
+        
+        if (isHorizontal) {
+          return a.position.x - b.position.x;
+        } else {
+          return a.position.y - b.position.y;
+        }
+      });
+      
+      // Создаем соединения между последовательными узлами
+      for (let i = 0; i < sortedNodes.length - 1; i++) {
+        const edge: Edge = {
+          id: `edge-auto-${i}-${i+1}`,
+          source: sortedNodes[i].id,
+          target: sortedNodes[i + 1].id,
+          type: 'default',
+          animated: true,
+          style: { 
+            stroke: '#2563eb',
+            strokeWidth: 4
+          },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 25,
+            height: 25,
+            color: '#2563eb',
+          }
+        };
+        
+        newEdges.push(edge);
+      }
+      
+      // Устанавливаем соединения с задержкой
+      if (newEdges.length > 0) {
+        setTimeout(() => {
+          console.log("Восстанавливаем соединения между узлами:", newEdges);
+          setEdges(newEdges);
+        }, 500);
+      }
+    }
+  }, [nodes, edges, setEdges]);
+
   return (
     <div className="min-h-screen bg-gray-50 py-12 px-4">
       <div className="max-w-7xl mx-auto">
@@ -809,6 +1008,36 @@ function App() {
               <option value="ollama">Ollama (Gemma3 12B)</option>
               <option value="gemini">Google Gemini</option>
             </select>
+            
+            {/* Ollama connection status indicator */}
+            {modelType === 'ollama' && (
+              <div className="ml-2 flex items-center">
+                {ollamaStatus === 'connected' && (
+                  <div className="flex items-center text-green-600">
+                    <CheckCircle className="w-4 h-4 mr-1" />
+                    <span className="text-xs">Подключено</span>
+                  </div>
+                )}
+                {ollamaStatus === 'disconnected' && (
+                  <div className="flex items-center text-red-600">
+                    <XCircle className="w-4 h-4 mr-1" />
+                    <span className="text-xs">Нет подключения</span>
+                  </div>
+                )}
+                {ollamaStatus === 'unknown' && (
+                  <div className="flex items-center text-gray-400">
+                    <Loader className="w-4 h-4 mr-1 animate-spin" />
+                    <span className="text-xs">Проверка...</span>
+                  </div>
+                )}
+                <button 
+                  onClick={checkOllamaConnection} 
+                  className="ml-2 text-xs text-blue-600 underline"
+                >
+                  Проверить
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Tabs */}
@@ -940,24 +1169,82 @@ function App() {
           )}
 
           {/* ReactFlow Canvas */}
-          <div className="mt-8 rounded-md border border-gray-300 h-[60vh]">
+          <div className="mt-8 rounded-md border border-gray-300 h-[60vh] relative">
+            {/* Модальное окно для редактирования */}
+            {editingNode && (
+              <div className="absolute inset-0 bg-black bg-opacity-40 z-10 flex items-center justify-center">
+                <div className="bg-white p-4 rounded-lg shadow-lg w-[80%] max-w-md">
+                  <h3 className="text-lg font-semibold mb-2">Редактирование блока</h3>
+                  <textarea
+                    className="w-full h-32 border rounded p-2 mb-3"
+                    value={editingText}
+                    onChange={(e) => setEditingText(e.target.value)}
+                  />
+                  <div className="flex justify-end gap-2">
+                    <button
+                      className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
+                      onClick={() => setEditingNode(null)}
+                    >
+                      Отмена
+                    </button>
+                    <button
+                      className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600"
+                      onClick={updateNodeText}
+                    >
+                      Сохранить
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            
             <ReactFlow
               nodes={nodes}
               edges={edges}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
+              onNodeDoubleClick={onNodeDoubleClick}
+              nodeTypes={nodeTypes}
               fitView
               attributionPosition="bottom-right"
+              defaultEdgeOptions={{
+                type: 'default',
+                animated: true,
+                style: { strokeWidth: 4, stroke: '#2563eb' },
+                markerEnd: {
+                  type: MarkerType.ArrowClosed,
+                  color: '#2563eb',
+                  width: 25,
+                  height: 25,
+                },
+              }}
+              connectionLineStyle={{ stroke: '#2563eb', strokeWidth: 3 }}
+              elementsSelectable={true}
+              snapToGrid={true}
+              snapGrid={[10, 10]}
             >
+              <Background color="#f0f0f0" gap={16} size={1} />
               <Controls />
-              <MiniMap />
-              <Background />
+              <MiniMap 
+                nodeStrokeColor="#6B7280"
+                nodeColor="#E5E7EB"
+                nodeBorderRadius={2}
+              />
             </ReactFlow>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+// Обертка с ReactFlowProvider
+function App() {
+  return (
+    <ReactFlowProvider>
+      <FlowchartApp />
+    </ReactFlowProvider>
   );
 }
 
